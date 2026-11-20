@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "description": "CloudPulse — Highly Available EC2 Web Application for AWS Solutions Architect Associate Graduation Project",
   "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "express": "^4.21.2",

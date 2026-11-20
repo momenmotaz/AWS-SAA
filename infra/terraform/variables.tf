@@ -26,18 +26,33 @@ variable "public_subnet_cidrs" {
   description = "CIDR blocks for Public Subnets across 2 AZs"
   type        = list(string)
   default     = ["10.0.1.0/24", "10.0.2.0/24"]
+
+  validation {
+    condition     = length(var.public_subnet_cidrs) == 2
+    error_message = "Exactly 2 public subnet CIDRs (one per Availability Zone) are required."
+  }
 }
 
 variable "private_app_subnet_cidrs" {
   description = "CIDR blocks for Private Application Subnets across 2 AZs"
   type        = list(string)
   default     = ["10.0.11.0/24", "10.0.12.0/24"]
+
+  validation {
+    condition     = length(var.private_app_subnet_cidrs) == 2
+    error_message = "Exactly 2 private application subnet CIDRs (one per Availability Zone) are required."
+  }
 }
 
 variable "private_db_subnet_cidrs" {
   description = "CIDR blocks for Private Database Subnets across 2 AZs"
   type        = list(string)
   default     = ["10.0.21.0/24", "10.0.22.0/24"]
+
+  validation {
+    condition     = length(var.private_db_subnet_cidrs) == 2
+    error_message = "Exactly 2 private database subnet CIDRs (one per Availability Zone) are required."
+  }
 }
 
 variable "instance_type" {
@@ -95,7 +110,7 @@ variable "enforce_cloudfront_origin_only" {
 }
 
 variable "domain_name" {
-  description = "Optional custom domain name for Route 53 Alias record pointing to CloudFront (e.g. app.example.com)"
+  description = "Optional custom domain name for Route 53 Alias record pointing to CloudFront (requires hosted_zone_id and cloudfront_acm_certificate_arn in us-east-1)"
   type        = string
   default     = ""
 }
@@ -110,10 +125,20 @@ variable "alb_acm_certificate_arn" {
   description = "Optional ACM TLS Certificate ARN in var.aws_region to encrypt CloudFront-to-ALB origin traffic over HTTPS"
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.alb_acm_certificate_arn == "" || can(regex("^arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+", var.alb_acm_certificate_arn))
+    error_message = "alb_acm_certificate_arn must be empty or a valid ACM certificate ARN in the deployment region."
+  }
 }
 
 variable "cloudfront_acm_certificate_arn" {
   description = "Optional ACM TLS Certificate ARN in us-east-1 for custom domain HTTPS on CloudFront"
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.cloudfront_acm_certificate_arn == "" || can(regex("^arn:aws:acm:us-east-1:[0-9]{12}:certificate/.+", var.cloudfront_acm_certificate_arn))
+    error_message = "CloudFront ACM certificates must be issued in us-east-1 (arn:aws:acm:us-east-1:<account>:certificate/...)."
+  }
 }

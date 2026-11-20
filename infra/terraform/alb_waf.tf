@@ -206,7 +206,12 @@ resource "aws_wafv2_web_acl" "alb" {
     statement {
       rate_based_statement {
         limit              = 2000
-        aggregate_key_type = "IP"
+        aggregate_key_type = "FORWARDED_IP"
+
+        forwarded_ip_config {
+          header_name       = "X-Forwarded-For"
+          fallback_behavior = "MATCH"
+        }
       }
     }
     visibility_config {

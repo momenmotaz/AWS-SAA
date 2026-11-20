@@ -4,7 +4,7 @@
 
 > [النسخة العربية (README.ar.md)](README.ar.md)
 
-CloudPulse is a production-style, multi-tier web application architected on **Amazon Web Services (AWS)** across two Availability Zones. All application compute (`Amazon EC2` inside an `Auto Scaling Group`) and relational storage (`Amazon RDS PostgreSQL Multi-AZ`) run inside isolated **private subnets**, behind **Amazon Route 53**, **Amazon CloudFront**, **AWS WAF**, and a Multi-AZ **Application Load Balancer (ALB)**. Administrative access is completely bastion-free via **AWS Systems Manager Session Manager**, with full observability through **Amazon CloudWatch** and **Amazon SNS**.
+CloudPulse is a production-style, multi-tier web application architected on **Amazon Web Services (AWS)** across two Availability Zones. All application compute (`Amazon EC2` inside an `Auto Scaling Group`) and relational storage (`Amazon RDS PostgreSQL Multi-AZ`) run inside isolated **private subnets**, behind **Amazon Route 53** *(optional)*, **Amazon CloudFront**, **AWS WAFv2**, and a Multi-AZ **Application Load Balancer (ALB)**. Administrative access is completely bastion-free via **AWS Systems Manager Session Manager**, with full observability through **Amazon CloudWatch** and **Amazon SNS**.
 
 ## Solution Architecture Diagram
 
@@ -19,19 +19,38 @@ CloudPulse is a production-style, multi-tier web application architected on **Am
 
 ---
 
-## Key AWS Services & Architectural Role
+## Implemented vs. Optional Components
 
-| Layer | AWS Service | Configuration & Responsibility |
+| Component | Status | Notes |
 |---|---|---|
-| **DNS & Routing** | **Amazon Route 53** | Alias record pointing to the **CloudFront** distribution (unified edge entry point) with active HTTPS `/health` checks |
-| **Edge Caching** | **Amazon CloudFront** | Caches static assets (`/static/*`) at global edge locations, proxies dynamic traffic to ALB, and injects a secret `X-CloudFront-Verify` header |
-| **L7 Security** | **AWS WAFv2** | Attached to ALB with OWASP Top 10 managed rule groups (`Common`, `SQLi`, `KnownBadInputs`) + per-IP rate limiting (2,000 req / 5 min) |
-| **Load Balancing** | **Elastic Load Balancing (ALB)** | Multi-AZ Layer 7 routing across both Public Subnets, locked to CloudFront's Managed Prefix List + `X-CloudFront-Verify` listener rule, with `/health` Target Group checks |
-| **Networking** | **Amazon VPC** | `10.0.0.0/16` spanning 2 AZs (`us-east-1a`, `us-east-1b`), 6 subnets (Public, Private App, Private DB), redundant NAT Gateways, tier Security Groups, and DB Network ACLs |
-| **Compute & Elasticity** | **Amazon EC2 + Auto Scaling** | Launch Template (AL2023, IMDSv2 required, encrypted gp3 EBS) deploying the real `app/server.js` Express + PostgreSQL app via `systemd`, Target Tracking (`60%` CPU) + Step Scaling (`min=2`, `desired=2`, `max=6`) |
-| **Database HA** | **Amazon RDS (Multi-AZ)** | PostgreSQL 16 Primary in `us-east-1a` with synchronous Standby in `us-east-1b` for automated failover, KMS encryption at rest, and Secrets Manager password management |
-| **Bastion-Free Access** | **AWS Systems Manager** | Session Manager via `AmazonSSMManagedInstanceCore` IAM role — zero inbound SSH (`port 22` closed) and no bastion host |
-| **Observability** | **Amazon CloudWatch + SNS** | Unified dashboard + alarms (`EC2 CPU > 75%`, `ALB 5xx > 5`, `RDS CPU > 80%`) triggering scaling and Ops email alerts |
+| **Multi-AZ VPC (`10.0.0.0/16`), 6 Subnets, IGW, 2x NAT GW, S3 VPC Endpoint, DB NACL** | **Implemented** | Core network deployed unconditionally in Terraform |
+| **KMS CMK + Private Versioned S3 Artifact Bucket** | **Implemented** | Encrypts RDS storage, Secrets Manager secret, EBS volumes, and EC2 app releases |
+| **ALB + Regional WAFv2 + Origin Protection (`X-CloudFront-Verify` + Prefix List)** | **Implemented** | Prevents direct-to-ALB bypass at both Security Group and ALB Listener levels |
+| **EC2 Launch Template (`IMDSv2`) + ASG + Express/PostgreSQL App (`systemd`)** | **Implemented** | Pulls immutable S3 release, installs deps via `npm ci --omit=dev`, checks `/health` |
+| **RDS PostgreSQL 16 Multi-AZ + Secrets Manager** | **Implemented** | Primary + synchronous Standby, advisory-locked DDL, TLS CA bundle verification |
+| **Systems Manager Session Manager + CloudWatch Dashboard & 3 Alarms + SNS Topic** | **Implemented** | Zero-SSH admin access and automated scaling/alerting |
+| **CloudFront Default HTTPS (`*.cloudfront.net`)** | **Implemented** | Works out-of-the-box without a custom domain |
+| **Route 53 Alias + Edge Health Check + Custom ACM Certificates** | **Optional** | Enabled when `domain_name`, `hosted_zone_id`, and `cloudfront_acm_certificate_arn` (`us-east-1`) are supplied; `alb_acm_certificate_arn` enables end-to-end HTTPS origin |
+| **SNS Email Subscription** | **Optional** | Created when `alert_email` is provided (requires email confirmation click) |
+
+---
+
+## Resource-to-Terraform-File Mapping
+
+| AWS Resources / Responsibility | Terraform File |
+|---|---|
+| Provider (`~> 5.70`), default tags, AZ & AL2023 AMI lookups | [`infra/terraform/main.tf`](infra/terraform/main.tf) |
+| Input variables & ARN/CIDR validation rules | [`infra/terraform/variables.tf`](infra/terraform/variables.tf) |
+| VPC, Public/Private App/Private DB Subnets, IGW, 2x NAT Gateways, Route Tables, DB NACL | [`infra/terraform/vpc.tf`](infra/terraform/vpc.tf) |
+| KMS CMK (`alias/cloudpulse-prod`), DB Subnet Group, Multi-AZ RDS PostgreSQL 16 + Secrets Manager | [`infra/terraform/rds.tf`](infra/terraform/rds.tf) |
+| Private versioned KMS-encrypted S3 artifact bucket, TLS bucket policy, lifecycle rule, S3 Gateway Endpoint | [`infra/terraform/s3_artifacts.tf`](infra/terraform/s3_artifacts.tf) |
+| ALB (`alb-sg`), App (`app-sg`), DB (`db-sg`) Security Groups, CloudFront prefix list, Least-Privilege EC2 IAM Role | [`infra/terraform/security.tf`](infra/terraform/security.tf) |
+| Multi-AZ ALB, Target Group (`/health`), HTTP/HTTPS Listeners, `X-CloudFront-Verify` rules, Regional WAFv2 Web ACL | [`infra/terraform/alb_waf.tf`](infra/terraform/alb_waf.tf) |
+| EC2 Launch Template (`IMDSv2`, encrypted `gp3` EBS), ASG (`min=2`, `desired=2`, `max=6`), Target Tracking & Step Scaling | [`infra/terraform/compute_asg.tf`](infra/terraform/compute_asg.tf) |
+| EC2 bootstrap script (`aws s3 sync`, `npm ci --omit=dev`, RDS CA bundle, `Secrets Manager -> /etc/cloudpulse.env`, `systemd`) | [`infra/terraform/user_data.sh`](infra/terraform/user_data.sh) |
+| CloudFront Distribution (`/static/*` cached, dynamic uncached, `X-CloudFront-Verify`), optional Route 53 Alias & Health Check | [`infra/terraform/edge_dns.tf`](infra/terraform/edge_dns.tf) |
+| CloudWatch Dashboard, 3 Metric Alarms (`EC2 CPU`, `ALB 5xx`, `RDS CPU`), SNS Topic & Email Subscription | [`infra/terraform/observability.tf`](infra/terraform/observability.tf) |
+| Stack outputs (endpoints, bucket, ASG, RDS, KMS, alarms) | [`infra/terraform/outputs.tf`](infra/terraform/outputs.tf) |
 
 ---
 
@@ -41,7 +60,7 @@ CloudPulse is a production-style, multi-tier web application architected on **Am
 |---|---|---|---|
 | **VPC** | `10.0.0.0/16` | `10.0.0.0/16` | DNS hostnames & resolution enabled |
 | **Public Subnets** | `10.0.1.0/24` | `10.0.2.0/24` | `0.0.0.0/0 -> Internet Gateway` (ALB + NAT Gateways) |
-| **Private App Subnets** | `10.0.11.0/24` | `10.0.12.0/24` | `0.0.0.0/0 -> Same-AZ NAT Gateway` (EC2 ASG instances) |
+| **Private App Subnets** | `10.0.11.0/24` | `10.0.12.0/24` | `0.0.0.0/0 -> Same-AZ NAT Gateway` + S3 Gateway Endpoint (EC2 ASG) |
 | **Private DB Subnets** | `10.0.21.0/24` | `10.0.22.0/24` | Local VPC route only — **zero internet egress** (RDS Multi-AZ) |
 
 ---
@@ -58,63 +77,74 @@ CloudPulse is a production-style, multi-tier web application architected on **Am
 │   ├── architecture.html          # Self-contained interactive HTML diagram
 │   └── architecture.drawio        # Editable draw.io XML with embedded AWS icons
 ├── app/
-│   ├── package.json               # Node.js Express + PostgreSQL web application
-│   ├── server.js                  # /health, /api/status (IMDSv2 + RDS), static assets
-│   └── public/                    # Frontend HTML & CSS cached by CloudFront
+│   ├── package.json               # Express + pg app manifest and test script
+│   ├── package-lock.json          # Locked dependency tree for reproducible `npm ci`
+│   ├── server.js                  # /health (RDS check), /api/status (IMDSv2 + RDS), static assets
+│   ├── public/                    # Frontend HTML & CSS cached by CloudFront
+│   └── test/server.test.js        # Local Node unit/integration tests (mocked pg pool)
 ├── infra/
 │   └── terraform/                 # Complete modular Terraform Infrastructure as Code
-│       ├── main.tf                # Providers, default tags, AL2023 AMI & AZ lookups
-│       ├── variables.tf           # Configurable CIDRs, ASG limits, RDS & DNS inputs
-│       ├── vpc.tf                 # VPC, 6 Subnets, IGW, 2x NAT GW, Route Tables, NACLs
-│       ├── security.tf            # Chained Security Groups + EC2 IAM Role (SSM/CW/Secrets)
-│       ├── alb_waf.tf             # Multi-AZ ALB, Target Group, Listeners, WAFv2 OWASP rules
-│       ├── compute_asg.tf         # Launch Template (IMDSv2), ASG, Target Tracking & Step Scaling
-│       ├── rds.tf                 # Multi-AZ RDS PostgreSQL 16 + Secrets Manager credentials
-│       ├── edge_dns.tf            # CloudFront distribution + optional Route 53 Alias/Health Check
-│       ├── observability.tf       # CloudWatch Dashboard, Alarms & SNS Topic
-│       ├── user_data.sh           # EC2 bootstrap script (fetches DB secret at boot)
-│       └── outputs.tf             # Key endpoints & ARNs
 └── scripts/
-    ├── deploy.sh                  # Real Terraform deploy + realistic --simulate mode
-    ├── verify.sh                  # Post-deployment validation checklist (Live + --simulate)
-    ├── simulate-load.sh           # ASG scaling & RDS Multi-AZ failover exercise
-    └── destroy.sh                 # Full resource teardown (Live + --simulate)
+    ├── deploy.sh                  # Preflight + terraform plan + confirmed apply (or --simulate)
+    ├── verify.sh                  # Live AWS CLI + HTTP verification (or --simulate mock mode)
+    ├── simulate-load.sh           # Live CloudFront concurrency test (or --simulate walkthrough)
+    └── destroy.sh                 # Confirmed terraform destroy (or --simulate mock teardown)
 ```
 
 ---
 
-## Quick Start
+## Key Architectural & Security Decisions
 
-### Option A — Deployment Simulation Mode (No AWS Account / Zero Cost)
+1. **Canonical Traffic Flow (`Route 53 -> CloudFront -> WAFv2 -> ALB -> EC2 -> RDS`):**
+   - Route 53 Alias points to CloudFront (not directly to the ALB) so every request benefits from global edge caching (`/static/*`) and HTTPS termination.
+   - Direct ALB bypass is blocked in two layers: `alb-sg` accepts ingress only from the AWS-managed `com.amazonaws.global.cloudfront.origin-facing` prefix list on the active origin port, and ALB listener rules require the shared `X-CloudFront-Verify` custom header (returning `HTTP 403` otherwise).
+   - **Why `REGIONAL` WAFv2 on ALB:** Keeping WAFv2 in `REGIONAL` scope allows deploying the stack into **any** AWS region (whereas `CLOUDFRONT` scope restricts Web ACLs to `us-east-1`). Rate limiting uses `FORWARDED_IP` (`X-Forwarded-For`) so limits apply per real client IP rather than per CloudFront POP.
+2. **Immutable Versioned S3 Application Delivery:**
+   - Instead of embedding application code in size-limited `user_data` (16 KB cap) or cloning an unpinned branch, Terraform hashes `app/` files into a content-addressed release prefix (`releases/<sha256-16>/`) in a private, KMS-encrypted, versioned S3 bucket (`force_destroy = true`).
+   - EC2 instances pull their release over a zero-cost **S3 Gateway VPC Endpoint**, run `npm ci --omit=dev` against `package-lock.json`, fetch RDS credentials from **Secrets Manager** into `/etc/cloudpulse.env` (`chmod 640`, `root:cloudpulse`), download the official AWS RDS global CA bundle (`rds-global-bundle.pem`), and run `app/server.js` under `systemd`.
+3. **Concurrent Schema Safety & Sanitized Health Checks:**
+   - Multiple EC2 instances booting simultaneously serialize `CREATE TABLE IF NOT EXISTS page_visits` using a PostgreSQL advisory lock (`pg_advisory_lock(84729103)`).
+   - `/health` verifies actual RDS connectivity (`SELECT 1`) and returns HTTP `503` with sanitized `"database": "unavailable"` on errors (never exposing DB hostnames, credentials, or stack traces).
+4. **Encryption in Transit (Lab Mode vs. Production Mode):**
+   - **Users → CloudFront:** Always **HTTPS (`TLSv1.2+`)** via `redirect-to-https`.
+   - **CloudFront → ALB:** **HTTPS (`https-only`, `ELBSecurityPolicy-TLS13-1-2-2021-06`)** in production when `alb_acm_certificate_arn` (in `var.aws_region`) is provided. Falls back to HTTP (`port 80`) **only** in lab/demo deployments without an ACM certificate.
+   - **EC2 → RDS PostgreSQL:** Always **TLS (`SSL`)** verified against AWS's RDS global CA bundle.
 
-Run the entire deployment, verification, Auto Scaling / RDS failover exercise, and teardown locally with realistic mock AWS resource IDs and outputs:
+---
+
+## Local Validation & App Tests
 
 ```bash
-# 1. Simulate full Multi-AZ AWS provisioning (writes .deployment-outputs.json)
+# 1. Run Node.js unit/HTTP tests (no AWS account required)
+cd app && npm ci --omit=dev && npm test && cd ..
+
+# 2. Validate shell scripts & Terraform formatting/syntax
+bash -n scripts/*.sh infra/terraform/user_data.sh
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform validate
+
+# 3. Optional: walk through offline MOCK simulation (clearly labeled simulated; creates NO AWS resources)
 ./scripts/deploy.sh --simulate --region us-east-1
-
-# 2. Run the 6-point architecture verification checklist
 ./scripts/verify.sh --simulate
-
-# 3. Simulate a traffic surge (ASG 2 -> 4 instances) and RDS Multi-AZ failover
 ./scripts/simulate-load.sh --simulate
-
-# 4. Simulate clean teardown
 ./scripts/destroy.sh --simulate
 ```
 
-### Option B — Live AWS Deployment (Terraform)
+---
 
-**Prerequisites:** AWS CLI v2 configured with credentials, Terraform `>= 1.6`, and `jq`.
+## Live AWS Deployment, Verification & Cleanup
+
+**Prerequisites:** AWS CLI v2 configured (`aws sts get-caller-identity` succeeds), Terraform `>= 1.6.0`, and `jq`.
 
 ```bash
-# Copy example variables if customizing
-cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
+# 1. Review execution plan first (no resources created)
+./scripts/deploy.sh --region us-east-1 --plan-only
 
-# Deploy live infrastructure to us-east-1
+# 2. Deploy interactively (runs preflight checks, shows cost warning, prompts 'yes' after plan)
 ./scripts/deploy.sh --region us-east-1 --email ops-alerts@example.com
 
-# Optional: include custom Route 53 domain & ACM TLS certificates for end-to-end HTTPS
+# Optional Production HTTPS + Custom Domain (CF cert MUST be in us-east-1; ALB cert in --region)
 ./scripts/deploy.sh \
   --region us-east-1 \
   --domain app.example.com \
@@ -122,64 +152,25 @@ cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
   --alb-cert-arn arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
   --cf-cert-arn arn:aws:acm:us-east-1:123456789012:certificate/yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
 
-# Verify live endpoints, CloudFront cache headers, WAF SQLi block, ASG & SSM
+# 3. Verify live AWS resources (CloudFront Deployed, ALB bypass blocked, /health, /api/status RDS visits, WAF 403, ASG, SSM, RDS Multi-AZ, Alarms)
 ./scripts/verify.sh
 
-# Clean up all AWS resources when finished to stop billing
+# 4. Run live HTTP concurrency test against CloudFront
+./scripts/simulate-load.sh --requests 200
+
+# 5. Destroy all billable resources when done (prompts 'DESTROY')
 ./scripts/destroy.sh --region us-east-1
 ```
 
 ---
 
-## Security & Well-Architected Highlights
+## Cost Awareness & Limitations
 
-### Security Groups & Network ACL Rules
-
-| Resource | Inbound Rules | Outbound Rules |
-|---|---|---|
-| **`alb-sg` (Public)** | `TCP 443` (with ALB certificate) or `TCP 80` (lab mode) strictly from AWS Managed Prefix List `com.amazonaws.global.cloudfront.origin-facing` (protected by AWS WAFv2 + `X-CloudFront-Verify` header) | `TCP 8080` to Private App Subnets (`10.0.11.0/24`, `10.0.12.0/24`) |
-| **`app-sg` (Private App)** | `TCP 8080` from `alb-sg` only (**port 22 SSH closed**) | `UDP/TCP 53` to VPC DNS (`10.0.0.0/16`) · `TCP 443` via NAT Gateway (SSM, CloudWatch, Secrets Manager, updates) · `TCP 5432` to Private DB Subnets |
-| **`db-sg` (Private DB)** | `TCP 5432` from `app-sg` only | Local VPC return traffic only |
-| **`private-db-nacl`** | Allow `TCP 5432` from Private App CIDRs only; Deny all else | Allow ephemeral ports `1024–65535` to Private App CIDRs only |
-
-### Encryption in Transit (End-to-End TLS Strategy)
-
-| Hop | Protocol | Notes |
-|---|---|---|
-| **Users → CloudFront** | **HTTPS (`TLSv1.2+`)** | Always enforced via `viewer_protocol_policy = "redirect-to-https"`. Uses default CloudFront certificate or custom ACM cert (`cloudfront_acm_certificate_arn` in `us-east-1`). |
-| **CloudFront → ALB** | **HTTPS (`TLSv1.2+`)** *(prod)* / HTTP *(lab)* | Automatically switches to `https-only` with `ELBSecurityPolicy-TLS13-1-2-2021-06` when `alb_acm_certificate_arn` is supplied (recommended for production); falls back to HTTP origin only when deploying in a lab without a custom domain/certificate. |
-| **EC2 → RDS PostgreSQL** | **TLS (`SSL`)** | Encrypted connection over isolated Private Subnets (`DB_SSL=true`). |
-
-### Application Bootstrap (`user_data.sh`)
-
-- Terraform embeds the actual application sources (`app/package.json`, `app/server.js`, `app/public/*`) into the EC2 Launch Template and deploys them under an unprivileged `cloudpulse` system user.
-- Dependencies (`express`, `pg`) are installed via `npm install --omit=dev`, RDS credentials are fetched from Secrets Manager into `/etc/cloudpulse.env` (`chmod 640`), and `systemd` starts `server.js`.
-- Bootstrap verifies `http://127.0.0.1:8080/health` returns `"database":"connected"` before completing, ensuring EC2-to-RDS integration is live before the ALB marks the target healthy.
-
-### AWS Well-Architected Alignment
-
-- **Security (Defense in Depth):** AWS WAF (OWASP Top 10 + 2,000 req/5m rate limit) → chained Security Groups → Private DB NACL → IMDSv2 enforced (`http_tokens = "required"`) → RDS credentials auto-managed in **AWS Secrets Manager** → EBS (`gp3`) & RDS KMS encryption at rest.
-- **Operational Excellence:** Zero-SSH bastion-free administration via **AWS Systems Manager Session Manager** (`AmazonSSMManagedInstanceCore`), unified CloudWatch Dashboard, and proactive SNS alerting.
-- **Reliability & High Availability:** Multi-AZ VPC across `us-east-1a` & `us-east-1b`, redundant per-AZ NAT Gateways (no cross-AZ single point of failure), ELB-backed ASG health replacement, and **Multi-AZ RDS** synchronous replication with automated failover (`RPO = 0`).
-- **Performance Efficiency:** **Amazon CloudFront** edge caching (`/static/*`, TTL 24h) reduces origin load and latency; Target Tracking (`60%` CPU) + Step Scaling handle traffic bursts smoothly.
-- **Cost Optimization:** Right-sized `t3.micro` / `db.t3.micro` baseline, CloudFront `PriceClass_100`, automatic ASG scale-in during off-peak hours, and one-command teardown via `destroy.sh`.
-
----
-
-## Cost Awareness & Cleanup
-
-Estimated monthly cost if left running continuously in `us-east-1` (on-demand rates; verify with the [AWS Pricing Calculator](https://calculator.aws/)):
-
-| Component | Configuration | Est. Monthly Cost (USD) |
-|---|---|---|
-| **NAT Gateways (2x)** | 1 per AZ + minimal data transfer | ~$65 |
-| **Application Load Balancer** | 1 ALB + low LCU usage | ~$22 |
-| **RDS PostgreSQL Multi-AZ** | `db.t3.micro`, 20 GB gp3 (Multi-AZ) | ~$28 |
-| **EC2 Instances (2x baseline)** | `t3.micro` (ASG min=2) | ~$15 |
-| **AWS WAFv2** | 1 Web ACL + 4 rules | ~$9 |
-| **CloudFront, Route 53, CloudWatch, SNS** | Low demo traffic | ~$3–5 |
-
-> **Always delete the stack after finishing your lab or demo** using `./scripts/destroy.sh --region us-east-1` to stop hourly charges.
+- **Estimated Continuous Cost (`us-east-1`, on-demand):** ~**$145/month** if left running 24/7 (2x NAT Gateways ~\$65, Multi-AZ `db.t3.micro` ~\$28, ALB ~\$22, 2x `t3.micro` EC2 ~\$15, WAFv2 ~\$9, CloudFront/CloudWatch/S3/KMS ~\$6). Verify with the [AWS Pricing Calculator](https://calculator.aws/).
+- **Known Limitations:**
+  - `deletion_protection = false` and `skip_final_snapshot = true` are set on RDS/ALB for clean lab teardown (`destroy.sh`); enable both before real production use.
+  - CloudFront `forwarded_values` blocks are used for broad Terraform provider compatibility; future updates may migrate to managed `cache_policy_id` / `origin_request_policy_id`.
+  - Live AWS deployment has not been executed in this repository environment; all live tests must be run in the owner's AWS account.
 
 ## License & Attribution
 

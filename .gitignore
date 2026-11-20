@@ -4,6 +4,8 @@
 *.tfstate.*
 *.tfvars
 !terraform.tfvars.example
+tfplan
+*.tfplan
 crash.log
 
 # Local deployment state & Node modules

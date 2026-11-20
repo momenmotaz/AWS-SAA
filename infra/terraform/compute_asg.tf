@@ -22,6 +22,7 @@ resource "aws_launch_template" "app" {
       volume_size           = 20
       volume_type           = "gp3"
       encrypted             = true
+      kms_key_id            = aws_kms_key.cloudpulse.arn
       delete_on_termination = true
     }
   }
@@ -30,28 +31,34 @@ resource "aws_launch_template" "app" {
     enabled = true
   }
 
-  # Embed real application files (gzip-compressed via base64gzip to stay well under EC2's 16KB user_data limit)
+  # Bootstrap installs the immutable, content-addressed versioned S3 release artifact
   user_data = base64encode(templatefile("${path.module}/user_data.sh", {
-    aws_region         = var.aws_region
-    db_host            = aws_db_instance.postgres.address
-    db_port            = aws_db_instance.postgres.port
-    db_name            = var.db_name
-    db_secret_arn      = aws_db_instance.postgres.master_user_secret[0].secret_arn
-    package_json_b64gz = base64gzip(file("${path.module}/../../app/package.json"))
-    server_js_b64gz    = base64gzip(file("${path.module}/../../app/server.js"))
-    index_html_b64gz   = base64gzip(file("${path.module}/../../app/public/index.html"))
-    styles_css_b64gz   = base64gzip(file("${path.module}/../../app/public/styles.css"))
+    aws_region      = var.aws_region
+    artifact_bucket = aws_s3_bucket.app_artifacts.id
+    app_version     = local.app_version
+    db_host         = aws_db_instance.postgres.address
+    db_port         = aws_db_instance.postgres.port
+    db_name         = var.db_name
+    db_secret_arn   = aws_db_instance.postgres.master_user_secret[0].secret_arn
   }))
 
   tag_specifications {
     resource_type = "instance"
     tags = {
-      Name = "${var.project_name}-${var.environment}-web"
+      Name       = "${var.project_name}-${var.environment}-web"
+      AppVersion = local.app_version
     }
   }
 
-  # Ensure IAM secret-read policy is attached before instances launch and bootstrap
-  depends_on = [aws_iam_role_policy.read_rds_secret]
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  depends_on = [
+    aws_iam_role_policy.app_runtime_access,
+    aws_s3_object.app_bundle,
+    aws_vpc_endpoint.s3
+  ]
 }
 
 resource "aws_autoscaling_group" "app" {

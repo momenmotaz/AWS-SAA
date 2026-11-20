@@ -78,6 +78,13 @@ resource "aws_cloudfront_distribution" "web" {
     ssl_support_method             = var.cloudfront_acm_certificate_arn != "" ? "sni-only" : null
     minimum_protocol_version       = var.cloudfront_acm_certificate_arn != "" ? "TLSv1.2_2021" : "TLSv1"
   }
+
+  lifecycle {
+    precondition {
+      condition     = var.domain_name == "" || var.cloudfront_acm_certificate_arn != ""
+      error_message = "When domain_name is specified, cloudfront_acm_certificate_arn (in us-east-1) must also be provided for CloudFront CNAME aliases."
+    }
+  }
 }
 
 # Optional Route 53 Alias Record pointing cleanly to CloudFront (unified edge entry point)

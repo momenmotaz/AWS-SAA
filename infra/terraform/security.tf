@@ -11,7 +11,7 @@ locals {
 # ALB Security Group — locked strictly to CloudFront origin-facing IPs by default (prevents direct ALB bypass)
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"
-  description = "Allow HTTP/HTTPS ingress strictly from CloudFront edge locations (or 0.0.0.0/0 if origin-lock disabled)"
+  description = "Allow origin ingress strictly from CloudFront edge locations (or 0.0.0.0/0 if origin-lock disabled)"
   vpc_id      = aws_vpc.main.id
 
   # A single ingress rule is used on purpose: the CloudFront origin-facing prefix list has ~55 entries and each
@@ -69,7 +69,7 @@ resource "aws_security_group" "app" {
   }
 
   egress {
-    description = "Outbound HTTPS via NAT Gateway (SSM, CloudWatch, Secrets Manager, npm/dnf)"
+    description = "Outbound HTTPS via NAT Gateway & S3 VPC Endpoint (SSM, CloudWatch, Secrets Manager, S3, npm/dnf)"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -108,7 +108,7 @@ resource "aws_security_group" "db" {
   }
 }
 
-# Least-Privilege IAM Role for EC2 Instances (SSM Session Manager + CloudWatch + Single RDS Secret Read)
+# Least-Privilege IAM Role for EC2 Instances (SSM Session Manager + CloudWatch + Exact Secret + KMS + Versioned S3 Artifacts)
 resource "aws_iam_role" "ec2_app" {
   name = "${var.project_name}-${var.environment}-ec2-role"
 
@@ -134,8 +134,8 @@ resource "aws_iam_role_policy_attachment" "cw_agent" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
-resource "aws_iam_role_policy" "read_rds_secret" {
-  name = "${var.project_name}-read-rds-secret"
+resource "aws_iam_role_policy" "app_runtime_access" {
+  name = "${var.project_name}-app-runtime-access"
   role = aws_iam_role.ec2_app.id
 
   policy = jsonencode({
@@ -146,6 +146,37 @@ resource "aws_iam_role_policy" "read_rds_secret" {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = [aws_db_instance.postgres.master_user_secret[0].secret_arn]
+      },
+      {
+        Sid      = "DecryptRDSAndArtifactKMSKey"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = [aws_kms_key.cloudpulse.arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = [
+              "secretsmanager.${var.aws_region}.amazonaws.com",
+              "s3.${var.aws_region}.amazonaws.com"
+            ]
+          }
+        }
+      },
+      {
+        Sid      = "ReadVersionedAppArtifacts"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.app_artifacts.arn}/releases/*"]
+      },
+      {
+        Sid      = "ListVersionedAppArtifacts"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.app_artifacts.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["releases/*"]
+          }
+        }
       }
     ]
   })
