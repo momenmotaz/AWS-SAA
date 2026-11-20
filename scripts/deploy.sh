@@ -40,6 +40,39 @@ log_info() { echo -e "  ${CYAN}[INFO]${NC} $1"; }
 log_sim()  { echo -e "  ${YELLOW}[SIMULATED]${NC} $1"; }
 log_err()  { echo -e "  ${RED}[ERROR]${NC} $1" >&2; }
 
+verify_release_bundle() {
+  local app_dir="${ROOT_DIR}/app"
+  local required_files=(
+    "package.json"
+    "package-lock.json"
+    "server.js"
+    "public/index.html"
+    "public/styles.css"
+  )
+
+  for rel in "${required_files[@]}"; do
+    if [[ ! -f "${app_dir}/${rel}" ]]; then
+      log_err "Missing required release artifact file: app/${rel}"
+      exit 1
+    fi
+  done
+
+  # Guard against accidentally packaging secrets into S3 release artifacts
+  if find "${app_dir}" -maxdepth 2 \( -name ".env*" -o -name "*.pem" -o -name "*.key" \) | grep -q .; then
+    log_err "Sensitive file detected inside app/. Remove .env/key files before packaging S3 release."
+    exit 1
+  fi
+
+  APP_RELEASE_VERSION=$(python3 -c '
+import hashlib, pathlib
+app = pathlib.Path("'"${app_dir}"'")
+files = ["package.json", "package-lock.json", "public/index.html", "public/styles.css", "server.js"]
+joined = "".join(hashlib.sha256((app / f).read_bytes()).hexdigest() for f in sorted(files))
+print(hashlib.sha256(joined.encode()).hexdigest()[:16])
+')
+  log_ok "Release bundle verified (releases/${APP_RELEASE_VERSION}/ includes package-lock.json, zero secrets)"
+}
+
 usage() {
   cat <<'EOF'
 CloudPulse Deployment Script
@@ -104,8 +137,9 @@ if [[ "$SIMULATE" == true ]]; then
   ASG_NAME="${PROJECT}-${ENV}-asg"
   DASHBOARD="${PROJECT}-${ENV}-overview"
 
-  log_step "1/7 [SIMULATION] Checking local project structure"
+  log_step "1/7 [SIMULATION] Checking local project structure & release bundle"
   log_sim "Mock Caller Identity: arn:aws:iam::${ACCOUNT_ID}:user/saa-architect"
+  verify_release_bundle
   log_sim "Terraform configs verified in ${TF_DIR}"
 
   log_step "2/7 [SIMULATION] Multi-AZ VPC (${REGION}a & ${REGION}b)"
@@ -118,7 +152,7 @@ if [[ "$SIMULATE" == true ]]; then
 
   log_step "3/7 [SIMULATION] KMS, Private S3 Artifact Bucket, IAM & WAFv2"
   log_sim "aws_kms_key.cloudpulse      -> ${KMS_ARN}"
-  log_sim "aws_s3_bucket.app_artifacts -> s3://${BUCKET}/releases/sim-release/ (versioned + KMS)"
+  log_sim "aws_s3_bucket.app_artifacts -> s3://${BUCKET}/releases/${APP_RELEASE_VERSION}/ (versioned + KMS)"
   log_sim "aws_security_group.alb      -> sg-0a11111111111111a (CloudFront prefix list + X-CloudFront-Verify)"
   log_sim "aws_wafv2_web_acl.alb       -> ${WAF_ARN} (REGIONAL, FORWARDED_IP rate limit)"
 
@@ -171,14 +205,15 @@ fi
 # ------------------------------------------------------------------------------
 # REAL AWS PREFLIGHT CHECKS & DEPLOYMENT
 # ------------------------------------------------------------------------------
-log_step "1/5 Running preflight checks"
-for cmd in aws terraform jq; do
+log_step "1/5 Running preflight checks & release artifact verification"
+for cmd in aws terraform jq python3; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     log_err "Required tool '$cmd' is not installed or not in PATH."
     exit 1
   fi
 done
-log_ok "Found aws, terraform ($(terraform version -json | jq -r '.terraform_version')), and jq"
+log_ok "Found aws, terraform ($(terraform version -json | jq -r '.terraform_version')), jq, and python3"
+verify_release_bundle
 
 if [[ -n "$DOMAIN" ]]; then
   if [[ -z "$ZONE_ID" || -z "$CF_CERT_ARN" ]]; then

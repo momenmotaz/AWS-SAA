@@ -71,15 +71,17 @@ resource "aws_autoscaling_group" "app" {
   health_check_type         = "ELB"
   health_check_grace_period = 240
 
+  # Pin ASG to the concrete Launch Template latest_version so Launch Template changes trigger instance_refresh
   launch_template {
     id      = aws_launch_template.app.id
-    version = "$Latest"
+    version = aws_launch_template.app.latest_version
   }
 
   instance_refresh {
     strategy = "Rolling"
     preferences {
       min_healthy_percentage = 50
+      instance_warmup        = 180
     }
   }
 

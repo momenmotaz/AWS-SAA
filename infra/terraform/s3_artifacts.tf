@@ -62,6 +62,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "app_artifacts" {
     noncurrent_version_expiration {
       noncurrent_days = 30
     }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
   }
 }
 
@@ -98,9 +102,16 @@ resource "aws_s3_object" "app_bundle" {
   source     = each.value
   etag       = filemd5(each.value)
   kms_key_id = aws_kms_key.cloudpulse.arn
+
+  depends_on = [
+    aws_s3_bucket_public_access_block.app_artifacts,
+    aws_s3_bucket_versioning.app_artifacts,
+    aws_s3_bucket_server_side_encryption_configuration.app_artifacts,
+    aws_s3_bucket_policy.app_artifacts_tls_only,
+  ]
 }
 
-# Private Gateway VPC Endpoint for S3 (zero hourly cost, keeps artifact sync on AWS private backbone)
+# Private Gateway VPC Endpoint for S3 (zero hourly cost, keeps artifact sync & AL2023 repo traffic off public NAT)
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
