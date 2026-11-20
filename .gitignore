@@ -1,0 +1,14 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+crash.log
+
+# Local deployment state & Node modules
+.deployment-outputs.json
+node_modules/
+.env
+*.log
+.DS_Store

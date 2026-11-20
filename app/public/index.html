@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CloudPulse — AWS Multi-AZ Scalable Web App</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <span class="badge">AWS SAA · Project 1</span>
+      <h1>CloudPulse</h1>
+      <p class="subtitle">Multi-AZ EC2 Web Application behind CloudFront, AWS WAF, ALB, Auto Scaling, and Multi-AZ RDS PostgreSQL.</p>
+    </header>
+
+    <section class="grid" id="metrics">
+      <article class="card">
+        <span class="label">EC2 Instance ID</span>
+        <strong id="instanceId">Loading...</strong>
+      </article>
+      <article class="card">
+        <span class="label">Availability Zone</span>
+        <strong id="az">Loading...</strong>
+      </article>
+      <article class="card">
+        <span class="label">Database Tier</span>
+        <strong id="db">Loading...</strong>
+      </article>
+      <article class="card">
+        <span class="label">Total Requests Logged</span>
+        <strong id="visits">0</strong>
+      </article>
+    </section>
+
+    <footer class="foot">
+      <span id="meta">IMDSv2 verified · Zero-SSH via AWS Systems Manager Session Manager</span>
+      <button id="refreshBtn" type="button">Refresh Instance Check</button>
+    </footer>
+  </main>
+
+  <script>
+    async function loadStatus() {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      document.getElementById('instanceId').textContent = data.instanceId;
+      document.getElementById('az').textContent = data.availabilityZone;
+      document.getElementById('db').textContent = data.database;
+      document.getElementById('visits').textContent = data.totalVisits;
+    }
+    document.getElementById('refreshBtn').addEventListener('click', loadStatus);
+    loadStatus();
+  </script>
+</body>
+</html>
