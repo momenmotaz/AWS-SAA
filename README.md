@@ -23,12 +23,12 @@ CloudPulse is a production-style, multi-tier web application architected on **Am
 
 | Layer | AWS Service | Configuration & Responsibility |
 |---|---|---|
-| **DNS & Routing** | **Amazon Route 53** | Alias record pointing to the ALB / edge entrypoint with active `/health` checks |
-| **Edge Caching** | **Amazon CloudFront** | Caches static assets (`/static/*`) at global edge locations to reduce origin load and latency |
+| **DNS & Routing** | **Amazon Route 53** | Alias record pointing to the **CloudFront** distribution (unified edge entry point) with active HTTPS `/health` checks |
+| **Edge Caching** | **Amazon CloudFront** | Caches static assets (`/static/*`) at global edge locations, proxies dynamic traffic to ALB, and injects a secret `X-CloudFront-Verify` header |
 | **L7 Security** | **AWS WAFv2** | Attached to ALB with OWASP Top 10 managed rule groups (`Common`, `SQLi`, `KnownBadInputs`) + per-IP rate limiting (2,000 req / 5 min) |
-| **Load Balancing** | **Elastic Load Balancing (ALB)** | Multi-AZ Layer 7 routing across both Public Subnets with `/health` Target Group checks |
+| **Load Balancing** | **Elastic Load Balancing (ALB)** | Multi-AZ Layer 7 routing across both Public Subnets, locked to CloudFront's Managed Prefix List + `X-CloudFront-Verify` listener rule, with `/health` Target Group checks |
 | **Networking** | **Amazon VPC** | `10.0.0.0/16` spanning 2 AZs (`us-east-1a`, `us-east-1b`), 6 subnets (Public, Private App, Private DB), redundant NAT Gateways, tier Security Groups, and DB Network ACLs |
-| **Compute & Elasticity** | **Amazon EC2 + Auto Scaling** | Launch Template (Amazon Linux 2023, IMDSv2 required, encrypted gp3 EBS), Target Tracking (`60%` CPU) + Step Scaling across Private App Subnets (`min=2`, `desired=2`, `max=6`) |
+| **Compute & Elasticity** | **Amazon EC2 + Auto Scaling** | Launch Template (AL2023, IMDSv2 required, encrypted gp3 EBS) deploying the real `app/server.js` Express + PostgreSQL app via `systemd`, Target Tracking (`60%` CPU) + Step Scaling (`min=2`, `desired=2`, `max=6`) |
 | **Database HA** | **Amazon RDS (Multi-AZ)** | PostgreSQL 16 Primary in `us-east-1a` with synchronous Standby in `us-east-1b` for automated failover, KMS encryption at rest, and Secrets Manager password management |
 | **Bastion-Free Access** | **AWS Systems Manager** | Session Manager via `AmazonSSMManagedInstanceCore` IAM role — zero inbound SSH (`port 22` closed) and no bastion host |
 | **Observability** | **Amazon CloudWatch + SNS** | Unified dashboard + alarms (`EC2 CPU > 75%`, `ALB 5xx > 5`, `RDS CPU > 80%`) triggering scaling and Ops email alerts |
@@ -114,12 +114,13 @@ cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
 # Deploy live infrastructure to us-east-1
 ./scripts/deploy.sh --region us-east-1 --email ops-alerts@example.com
 
-# Optional: include custom Route 53 domain & ACM TLS certificate
+# Optional: include custom Route 53 domain & ACM TLS certificates for end-to-end HTTPS
 ./scripts/deploy.sh \
   --region us-east-1 \
   --domain app.example.com \
   --zone-id Z0123456789EXAMPLE \
-  --cert-arn arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  --alb-cert-arn arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+  --cf-cert-arn arn:aws:acm:us-east-1:123456789012:certificate/yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
 
 # Verify live endpoints, CloudFront cache headers, WAF SQLi block, ASG & SSM
 ./scripts/verify.sh
@@ -136,10 +137,24 @@ cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
 
 | Resource | Inbound Rules | Outbound Rules |
 |---|---|---|
-| **`alb-sg` (Public)** | `TCP 80/443` from `0.0.0.0/0` (protected by AWS WAFv2) | `TCP 8080` to Private App Subnets (`10.0.11.0/24`, `10.0.12.0/24`) |
-| **`app-sg` (Private App)** | `TCP 8080` from `alb-sg` only (**port 22 SSH closed**) | `TCP 443` via NAT Gateway (SSM, CloudWatch, OS updates) · `TCP 5432` to Private DB Subnets |
+| **`alb-sg` (Public)** | `TCP 443` (with ALB certificate) or `TCP 80` (lab mode) strictly from AWS Managed Prefix List `com.amazonaws.global.cloudfront.origin-facing` (protected by AWS WAFv2 + `X-CloudFront-Verify` header) | `TCP 8080` to Private App Subnets (`10.0.11.0/24`, `10.0.12.0/24`) |
+| **`app-sg` (Private App)** | `TCP 8080` from `alb-sg` only (**port 22 SSH closed**) | `UDP/TCP 53` to VPC DNS (`10.0.0.0/16`) · `TCP 443` via NAT Gateway (SSM, CloudWatch, Secrets Manager, updates) · `TCP 5432` to Private DB Subnets |
 | **`db-sg` (Private DB)** | `TCP 5432` from `app-sg` only | Local VPC return traffic only |
 | **`private-db-nacl`** | Allow `TCP 5432` from Private App CIDRs only; Deny all else | Allow ephemeral ports `1024–65535` to Private App CIDRs only |
+
+### Encryption in Transit (End-to-End TLS Strategy)
+
+| Hop | Protocol | Notes |
+|---|---|---|
+| **Users → CloudFront** | **HTTPS (`TLSv1.2+`)** | Always enforced via `viewer_protocol_policy = "redirect-to-https"`. Uses default CloudFront certificate or custom ACM cert (`cloudfront_acm_certificate_arn` in `us-east-1`). |
+| **CloudFront → ALB** | **HTTPS (`TLSv1.2+`)** *(prod)* / HTTP *(lab)* | Automatically switches to `https-only` with `ELBSecurityPolicy-TLS13-1-2-2021-06` when `alb_acm_certificate_arn` is supplied (recommended for production); falls back to HTTP origin only when deploying in a lab without a custom domain/certificate. |
+| **EC2 → RDS PostgreSQL** | **TLS (`SSL`)** | Encrypted connection over isolated Private Subnets (`DB_SSL=true`). |
+
+### Application Bootstrap (`user_data.sh`)
+
+- Terraform embeds the actual application sources (`app/package.json`, `app/server.js`, `app/public/*`) into the EC2 Launch Template and deploys them under an unprivileged `cloudpulse` system user.
+- Dependencies (`express`, `pg`) are installed via `npm install --omit=dev`, RDS credentials are fetched from Secrets Manager into `/etc/cloudpulse.env` (`chmod 640`), and `systemd` starts `server.js`.
+- Bootstrap verifies `http://127.0.0.1:8080/health` returns `"database":"connected"` before completing, ensuring EC2-to-RDS integration is live before the ALB marks the target healthy.
 
 ### AWS Well-Architected Alignment
 

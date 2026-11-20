@@ -8,21 +8,21 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const START_TIME = Date.now();
 
 let pgPool = null;
+let dbInitialized = false;
 let memoryVisits = 0;
 
 if (process.env.DATABASE_URL) {
-  try {
-    const { Pool } = require("pg");
-    pgPool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false },
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 3000,
-    });
-  } catch (err) {
-    console.warn("PostgreSQL driver unavailable, using in-memory fallback:", err.message);
-  }
+  const { Pool } = require("pg");
+  pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 3000,
+  });
+  pgPool.on("error", (err) => {
+    console.error("Unexpected PostgreSQL pool error:", err.message);
+  });
 }
 
 function httpRequest(options, body = null) {
@@ -70,8 +70,8 @@ async function fetchImdsMetadata() {
   }
 }
 
-async function initDb() {
-  if (!pgPool) return;
+async function ensureSchema() {
+  if (!pgPool || dbInitialized) return;
   await pgPool.query(`
     CREATE TABLE IF NOT EXISTS page_visits (
       id SERIAL PRIMARY KEY,
@@ -80,6 +80,23 @@ async function initDb() {
       visited_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+  dbInitialized = true;
+}
+
+async function initDbWithRetry(retries = 10, delayMs = 3000) {
+  if (!pgPool) return;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await ensureSchema();
+      console.log("RDS PostgreSQL connected and schema verified.");
+      return;
+    } catch (err) {
+      console.warn(`RDS connection attempt ${attempt}/${retries} failed: ${err.message}`);
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
 }
 
 app.use(express.json());
@@ -91,11 +108,12 @@ app.use(
   })
 );
 
-// ALB Target Group health check endpoint
+// ALB Target Group health check endpoint — verifies RDS connectivity when DATABASE_URL is configured
 app.get("/health", async (_req, res) => {
   let dbStatus = "in-memory-fallback";
   if (pgPool) {
     try {
+      await ensureSchema();
       await pgPool.query("SELECT 1");
       dbStatus = "connected";
     } catch (err) {
@@ -116,6 +134,7 @@ app.get("/api/status", async (_req, res) => {
 
   if (pgPool) {
     try {
+      await ensureSchema();
       await pgPool.query(
         "INSERT INTO page_visits (instance_id, availability_zone) VALUES ($1, $2)",
         [meta.instanceId, meta.availabilityZone]
@@ -145,10 +164,19 @@ app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-initDb()
-  .catch((err) => console.error("DB init error:", err.message))
-  .finally(() => {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`CloudPulse listening on port ${PORT}`);
-    });
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`CloudPulse listening on port ${PORT}`);
+  initDbWithRetry().catch((err) => console.error("DB init error:", err.message));
+});
+
+// Graceful shutdown for ALB deregistration draining
+function shutdown(signal) {
+  console.log(`Received ${signal}; draining HTTP connections...`);
+  server.close(async () => {
+    if (pgPool) await pgPool.end().catch(() => {});
+    process.exit(0);
   });
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

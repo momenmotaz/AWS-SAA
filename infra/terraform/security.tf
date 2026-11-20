@@ -1,23 +1,28 @@
-# ALB Security Group — allows inbound HTTP/HTTPS from the internet / CloudFront
+# AWS-managed prefix list containing official Amazon CloudFront origin-facing edge IP ranges
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+locals {
+  # CloudFront connects to the ALB over HTTPS when an ALB certificate is provided, otherwise over HTTP (lab mode)
+  alb_origin_port = var.alb_acm_certificate_arn != "" ? 443 : 80
+}
+
+# ALB Security Group — locked strictly to CloudFront origin-facing IPs by default (prevents direct ALB bypass)
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"
-  description = "Allow HTTP/HTTPS ingress to Application Load Balancer"
+  description = "Allow HTTP/HTTPS ingress strictly from CloudFront edge locations (or 0.0.0.0/0 if origin-lock disabled)"
   vpc_id      = aws_vpc.main.id
 
+  # A single ingress rule is used on purpose: the CloudFront origin-facing prefix list has ~55 entries and each
+  # entry counts against the default quota of 60 inbound rules per Security Group (two ports would exceed it).
   ingress {
-    description = "HTTP from internet"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS from internet"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "Origin traffic from CloudFront on the active origin port (443 with ALB certificate, otherwise 80)"
+    from_port       = local.alb_origin_port
+    to_port         = local.alb_origin_port
+    protocol        = "tcp"
+    prefix_list_ids = var.enforce_cloudfront_origin_only ? [data.aws_ec2_managed_prefix_list.cloudfront.id] : []
+    cidr_blocks     = var.enforce_cloudfront_origin_only ? [] : ["0.0.0.0/0"]
   }
 
   egress {
@@ -48,7 +53,23 @@ resource "aws_security_group" "app" {
   }
 
   egress {
-    description = "Outbound HTTPS via NAT Gateway (SSM, packages, CloudWatch)"
+    description = "VPC DNS resolution (UDP)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "VPC DNS resolution (TCP)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "Outbound HTTPS via NAT Gateway (SSM, CloudWatch, Secrets Manager, npm/dnf)"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -87,7 +108,7 @@ resource "aws_security_group" "db" {
   }
 }
 
-# IAM Role for EC2 Instances (Systems Manager Session Manager + CloudWatch + RDS Secret Read)
+# Least-Privilege IAM Role for EC2 Instances (SSM Session Manager + CloudWatch + Single RDS Secret Read)
 resource "aws_iam_role" "ec2_app" {
   name = "${var.project_name}-${var.environment}-ec2-role"
 
@@ -119,11 +140,14 @@ resource "aws_iam_role_policy" "read_rds_secret" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_db_instance.postgres.master_user_secret[0].secret_arn]
-    }]
+    Statement = [
+      {
+        Sid      = "ReadSpecificRDSSecretOnly"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = [aws_db_instance.postgres.master_user_secret[0].secret_arn]
+      }
+    ]
   })
 }
 

@@ -30,12 +30,17 @@ resource "aws_launch_template" "app" {
     enabled = true
   }
 
+  # Embed real application files (gzip-compressed via base64gzip to stay well under EC2's 16KB user_data limit)
   user_data = base64encode(templatefile("${path.module}/user_data.sh", {
-    aws_region     = var.aws_region
-    db_host        = aws_db_instance.postgres.address
-    db_port        = aws_db_instance.postgres.port
-    db_name        = var.db_name
-    db_secret_arn  = aws_db_instance.postgres.master_user_secret[0].secret_arn
+    aws_region         = var.aws_region
+    db_host            = aws_db_instance.postgres.address
+    db_port            = aws_db_instance.postgres.port
+    db_name            = var.db_name
+    db_secret_arn      = aws_db_instance.postgres.master_user_secret[0].secret_arn
+    package_json_b64gz = base64gzip(file("${path.module}/../../app/package.json"))
+    server_js_b64gz    = base64gzip(file("${path.module}/../../app/server.js"))
+    index_html_b64gz   = base64gzip(file("${path.module}/../../app/public/index.html"))
+    styles_css_b64gz   = base64gzip(file("${path.module}/../../app/public/styles.css"))
   }))
 
   tag_specifications {
@@ -44,6 +49,9 @@ resource "aws_launch_template" "app" {
       Name = "${var.project_name}-${var.environment}-web"
     }
   }
+
+  # Ensure IAM secret-read policy is attached before instances launch and bootstrap
+  depends_on = [aws_iam_role_policy.read_rds_secret]
 }
 
 resource "aws_autoscaling_group" "app" {
@@ -54,7 +62,7 @@ resource "aws_autoscaling_group" "app" {
   desired_capacity          = var.asg_desired_capacity
   max_size                  = var.asg_max_size
   health_check_type         = "ELB"
-  health_check_grace_period = 180
+  health_check_grace_period = 240
 
   launch_template {
     id      = aws_launch_template.app.id

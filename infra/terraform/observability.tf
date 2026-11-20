@@ -75,8 +75,8 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "metric", x = 0, y = 0, width = 12, height = 6,
         properties = {
-          title   = "ALB Request Count & Target Response Time",
-          region  = var.aws_region,
+          title  = "ALB Request Count & Target Response Time",
+          region = var.aws_region,
           metrics = [
             ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", aws_lb.app.arn_suffix],
             [".", "TargetResponseTime", ".", "."]
@@ -86,8 +86,8 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "metric", x = 12, y = 0, width = 12, height = 6,
         properties = {
-          title   = "EC2 Auto Scaling Group CPU Utilization",
-          region  = var.aws_region,
+          title  = "EC2 Auto Scaling Group CPU Utilization",
+          region = var.aws_region,
           metrics = [
             ["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", aws_autoscaling_group.app.name]
           ]
@@ -96,8 +96,8 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "metric", x = 0, y = 6, width = 12, height = 6,
         properties = {
-          title   = "RDS Multi-AZ CPU & Database Connections",
-          region  = var.aws_region,
+          title  = "RDS Multi-AZ CPU & Database Connections",
+          region = var.aws_region,
           metrics = [
             ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", aws_db_instance.postgres.identifier],
             [".", "DatabaseConnections", ".", "."]

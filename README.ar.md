@@ -9,7 +9,8 @@
 **CloudPulse** هو مشروع معماري متكامل لتشغيل تطبيق ويب على **AWS** بدرجة عالية من الاعتمادية (High Availability) وقابلية التوسع (Scalability) عبر منطقتي توافر (**Availability Zones: `us-east-1a` و `us-east-1b`**):
 
 - جميع خوادم التطبيق (**Amazon EC2** داخل **Auto Scaling Group**) وقاعدة البيانات (**Amazon RDS PostgreSQL Multi-AZ**) معزولة تماماً داخل **Private Subnets**.
-- استقبال الترافيك يتم عبر **Route 53** و**CloudFront** (لكاش الملفات الثابتة) مروراً بـ **AWS WAF** (قواعد OWASP Top 10 و Rate Limiting) ثم **Application Load Balancer (ALB)**.
+- المسار الموحّد للترافيك: **Route 53 (Alias)** ← **CloudFront** (كاش `/static/*` مع حقن هيدر سري `X-CloudFront-Verify`) ← **AWS WAF** (قواعد OWASP Top 10 و Rate Limiting) ← **Application Load Balancer (ALB)** مقفول على IP ranges الخاصة بـ CloudFront فقط ← **EC2** ← **RDS Multi-AZ**.
+- ملف الـ `user_data.sh` بينشر التطبيق الفعلي الموجود في `app/server.js` (Express + PostgreSQL + IMDSv2) تحت مستخدم غير مُميز (`cloudpulse`) بـ `systemd` ويتحقق من الاتصال بـ RDS عبر `/health`.
 - الدخول الإداري للخوادم يتم بدون Bastion Host وبدون فتح بورت SSH عبر **AWS Systems Manager (Session Manager)**.
 - المراقبة والتنبيهات تتم عبر **Amazon CloudWatch** (Dashboard + Alarms) مع **Amazon SNS**.
 

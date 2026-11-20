@@ -48,9 +48,11 @@ echo -e "${BOLD}  CloudPulse — Architecture Validation Checklist ($([[ "$SIMUL
 echo -e "${BOLD}======================================================================${NC}"
 
 if [[ "$SIMULATE" == true ]]; then
-  head_sec "1. Application Load Balancer & Multi-AZ Target Health"
+  head_sec "1. Unified Edge Flow (Route 53 -> CloudFront -> WAF -> ALB -> EC2 -> RDS)"
   sleep 0.2
-  pass "GET http://${ALB_DNS}/health -> HTTP 200 {\"status\":\"healthy\",\"database\":\"connected\"}"
+  pass "GET https://${CF_DOMAIN}/health -> HTTP 200 {\"status\":\"healthy\",\"database\":\"connected\"}"
+  pass "GET https://${CF_DOMAIN}/api/status -> HTTP 200 (IMDSv2 instance metadata + RDS visit logged)"
+  pass "Direct ALB bypass blocked (CloudFront prefix list + X-CloudFront-Verify header -> HTTP 403)"
   pass "Target Group healthy targets: 2/2 (i-04f8a2c91d7e30b12 in ${REGION}a, i-09c3b7e42a1f60d88 in ${REGION}b)"
 
   head_sec "2. Amazon CloudFront Static Asset Caching"
@@ -59,7 +61,7 @@ if [[ "$SIMULATE" == true ]]; then
 
   head_sec "3. AWS WAF OWASP Top 10 Protection"
   sleep 0.2
-  pass "GET http://${ALB_DNS}/?id=1'%20OR%20'1'='1 -> HTTP 403 Forbidden (Matched: AWSManagedRulesSQLiRuleSet)"
+  pass "GET https://${CF_DOMAIN}/?id=1'%20OR%20'1'='1 -> HTTP 403 Forbidden (Matched: AWSManagedRulesSQLiRuleSet)"
   pass "Per-IP Rate Limit rule active (2,000 requests / 5 minutes)"
 
   head_sec "4. Private Compute Isolation & Bastion-Free SSM Session Manager"
@@ -82,16 +84,17 @@ if [[ "$SIMULATE" == true ]]; then
   exit 0
 fi
 
-# Live AWS Verification
-head_sec "1. Checking ALB /health endpoint"
-curl -fsS "http://${ALB_DNS}/health" && echo "" && pass "ALB /health returned 200 OK"
+# Live AWS Verification (routes through unified CloudFront HTTPS entry point)
+head_sec "1. Checking CloudFront -> ALB -> EC2 -> RDS /health & /api/status"
+curl -fsS "https://${CF_DOMAIN}/health" && echo "" && pass "CloudFront /health returned 200 OK"
+curl -fsS "https://${CF_DOMAIN}/api/status" && echo "" && pass "CloudFront /api/status returned live EC2 + RDS status"
 
 head_sec "2. Checking CloudFront static caching headers"
 curl -fsSI "https://${CF_DOMAIN}/static/styles.css" | grep -iE "HTTP/|x-cache|cache-control"
 pass "CloudFront served /static/styles.css"
 
 head_sec "3. Testing AWS WAF SQLi rule block (expecting 403)"
-WAF_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS}/?test=1%27%20OR%20%271%27=%271")
+WAF_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${CF_DOMAIN}/?test=1%27%20OR%20%271%27=%271")
 if [[ "${WAF_CODE}" == "403" ]]; then
   pass "AWS WAF blocked SQLi probe with HTTP 403"
 else

@@ -1,7 +1,7 @@
-# Copy to terraform.tfvars and adjust for your AWS training account
-project_name         = "cloudpulse"
-environment          = "prod"
-aws_region           = "us-east-1"
+# Copy to terraform.tfvars and adjust for your AWS account
+project_name = "cloudpulse"
+environment  = "prod"
+aws_region   = "us-east-1"
 
 vpc_cidr                 = "10.0.0.0/16"
 public_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24"]
@@ -17,8 +17,12 @@ db_instance_class = "db.t3.micro"
 db_name           = "cloudpulse"
 db_username       = "cloudpulse_admin"
 
-# Optional alerting & custom domain
-alert_email         = "ops-alerts@example.com"
-domain_name         = ""
-hosted_zone_id      = ""
-acm_certificate_arn = ""
+# Security: lock ALB ingress strictly to CloudFront prefix list + custom origin header
+enforce_cloudfront_origin_only = true
+
+# Optional alerting & custom domain (Route 53 -> CloudFront -> ALB)
+alert_email                    = "ops-alerts@example.com"
+domain_name                    = ""
+hosted_zone_id                 = ""
+alb_acm_certificate_arn        = "" # Must be in var.aws_region
+cloudfront_acm_certificate_arn = "" # Must be in us-east-1 for CloudFront custom domains

@@ -4,7 +4,7 @@ set -euo pipefail
 # ==============================================================================
 # CloudPulse AWS Deployment Script (Real Terraform Deploy + Realistic --simulate)
 # Usage:
-#   ./scripts/deploy.sh --simulate [--region us-east-1] [--domain app.cloudpulse.demo]
+#   ./scripts/deploy.sh --simulate [--region us-east-1] [--domain app.cloudpulse.example.com]
 #   ./scripts/deploy.sh --region us-east-1 [--email ops@example.com] [--domain ...]
 # ==============================================================================
 
@@ -17,7 +17,8 @@ ENV="prod"
 PROJECT="cloudpulse"
 DOMAIN=""
 ZONE_ID=""
-CERT_ARN=""
+ALB_CERT_ARN=""
+CF_CERT_ARN=""
 ALERT_EMAIL="ops-alerts@example.com"
 SIMULATE=false
 
@@ -36,12 +37,14 @@ log_warn() { echo -e "  ${YELLOW}[SIM]${NC} $1"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --simulate|--dry-run) SIMULATE=true; shift ;;
-    --region)   REGION="$2"; shift 2 ;;
-    --env)      ENV="$2"; shift 2 ;;
-    --domain)   DOMAIN="$2"; shift 2 ;;
-    --zone-id)  ZONE_ID="$2"; shift 2 ;;
-    --cert-arn) CERT_ARN="$2"; shift 2 ;;
-    --email)    ALERT_EMAIL="$2"; shift 2 ;;
+    --region)       REGION="$2"; shift 2 ;;
+    --env)          ENV="$2"; shift 2 ;;
+    --domain)       DOMAIN="$2"; shift 2 ;;
+    --zone-id)      ZONE_ID="$2"; shift 2 ;;
+    --alb-cert-arn) ALB_CERT_ARN="$2"; shift 2 ;;
+    --cf-cert-arn)  CF_CERT_ARN="$2"; shift 2 ;;
+    --cert-arn)     ALB_CERT_ARN="$2"; shift 2 ;;
+    --email)        ALERT_EMAIL="$2"; shift 2 ;;
     -h|--help)
       sed -n '3,10p' "$0"
       exit 0
@@ -71,7 +74,7 @@ if [[ "$SIMULATE" == true ]]; then
   log_step "1/7 Validating IAM caller identity & Terraform configuration"
   sleep 0.3
   log_warn "Caller Identity: arn:aws:iam::${ACCOUNT_ID}:user/saa-architect (simulated)"
-  log_ok   "Terraform modules verified under infra/terraform/ (9 .tf files)"
+  log_ok   "Terraform modules verified under infra/terraform/ (9 .tf files + app/server.js bootstrap)"
 
   log_step "2/7 Provisioning Multi-AZ VPC (${REGION}a & ${REGION}b)"
   sleep 0.4
@@ -85,10 +88,10 @@ if [[ "$SIMULATE" == true ]]; then
 
   log_step "3/7 Configuring Security Groups, IAM Role & AWS WAFv2"
   sleep 0.3
-  log_ok "aws_security_group.alb           -> sg-0a11111111111111a (80/443 from 0.0.0.0/0)"
-  log_ok "aws_security_group.app           -> sg-0b22222222222222b (8080 from alb-sg only; ZERO SSH)"
+  log_ok "aws_security_group.alb           -> sg-0a11111111111111a (CloudFront prefix list only + X-CloudFront-Verify)"
+  log_ok "aws_security_group.app           -> sg-0b22222222222222b (8080 from alb-sg only; DNS+443+5432 egress; ZERO SSH)"
   log_ok "aws_security_group.db            -> sg-0c33333333333333c (5432 from app-sg only)"
-  log_ok "aws_iam_role.ec2_app             -> AmazonSSMManagedInstanceCore + CloudWatchAgent + SecretsManager"
+  log_ok "aws_iam_role.ec2_app             -> AmazonSSMManagedInstanceCore + CloudWatchAgent + Single RDS Secret ARN"
   log_ok "aws_wafv2_web_acl.alb            -> ${WAF_ARN}"
   log_info "WAF Rules Active: CommonRuleSet, SQLiRuleSet, KnownBadInputs, RateLimit(2000 req/5m)"
 
@@ -100,18 +103,18 @@ if [[ "$SIMULATE" == true ]]; then
 
   log_step "5/7 Deploying Application Load Balancer & EC2 Auto Scaling Group"
   sleep 0.4
-  log_ok "aws_lb.app                       -> ${ALB_DNS}"
-  log_ok "aws_launch_template.app          -> lt-0e98a7b6c5d4f3210 (AL2023, t3.micro, IMDSv2 required)"
+  log_ok "aws_lb.app                       -> ${ALB_DNS} (origin-locked to CloudFront)"
+  log_ok "aws_launch_template.app          -> lt-0e98a7b6c5d4f3210 (AL2023, t3.micro, IMDSv2, deploys app/server.js + npm)"
   log_ok "aws_autoscaling_group.app        -> ${ASG_NAME} (min=2, desired=2, max=6)"
   log_ok "EC2 Targets Healthy (2/2)        -> i-04f8a2c91d7e30b12 (${REGION}a, 10.0.11.42) & i-09c3b7e42a1f60d88 (${REGION}b, 10.0.12.87)"
-  log_info "Scaling Policy: TargetTrackingScaling (ASGAverageCPUUtilization = 60%) + StepScaling"
+  log_info "App Bootstrap Verified: Express + pg pool connected to RDS PostgreSQL (/health -> database: connected)"
 
   log_step "6/7 Provisioning Amazon CloudFront & Route 53 Alias + Health Check"
   sleep 0.3
   log_ok "aws_cloudfront_distribution.web  -> https://${CF_DOMAIN} (ID: ${CF_ID})"
-  log_info "Cache Behaviors: /static/* (TTL 86400s edge cache) | /* (dynamic origin -> ALB)"
-  log_ok "aws_route53_record.app_alias     -> ${DOMAIN_EFFECTIVE} -> ALIAS ${ALB_DNS}"
-  log_ok "aws_route53_health_check.alb     -> hc-7a6b5c4d-3e2f-1a0b-9c8d (HTTP /health, 30s)"
+  log_info "Unified Path: Route 53 -> CloudFront -> X-CloudFront-Verify + WAF -> ALB -> Private EC2 -> RDS"
+  log_ok "aws_route53_record.app_alias     -> ${DOMAIN_EFFECTIVE} -> ALIAS ${CF_DOMAIN}"
+  log_ok "aws_route53_health_check.web     -> hc-7a6b5c4d-3e2f-1a0b-9c8d (HTTPS /health, 30s)"
 
   log_step "7/7 Creating CloudWatch Dashboard, Alarms & SNS Notifications"
   sleep 0.3
@@ -151,7 +154,7 @@ EOF
   echo -e "\n${GREEN}${BOLD}Deployment simulation complete!${NC}"
   echo -e "  Outputs saved to : ${OUT_FILE}"
   echo -e "  Application URL  : https://${CF_DOMAIN}"
-  echo -e "  ALB Endpoint     : http://${ALB_DNS}"
+  echo -e "  Route 53 Alias   : https://${DOMAIN_EFFECTIVE} -> ${CF_DOMAIN}"
   echo -e "  SSM Access Cmd   : aws ssm start-session --target i-04f8a2c91d7e30b12 --region ${REGION}"
   echo -e "  Next step        : ./scripts/verify.sh --simulate"
   exit 0
@@ -179,9 +182,10 @@ terraform apply -auto-approve \
   -var="alert_email=${ALERT_EMAIL}" \
   -var="domain_name=${DOMAIN}" \
   -var="hosted_zone_id=${ZONE_ID}" \
-  -var="acm_certificate_arn=${CERT_ARN}"
+  -var="alb_acm_certificate_arn=${ALB_CERT_ARN}" \
+  -var="cloudfront_acm_certificate_arn=${CF_CERT_ARN}"
 
 log_step "4/4 Exporting live stack outputs"
 terraform output -json | jq 'with_entries(.value = .value.value) + {mode: "live", region: "'"${REGION}"'"}' > "${OUT_FILE}"
 log_ok "Live deployment complete. Outputs saved to ${OUT_FILE}"
-log_info "Run ./scripts/verify.sh to verify endpoints, WAF, SSM, and RDS Multi-AZ."
+log_info "Run ./scripts/verify.sh to verify CloudFront, WAF, RDS connectivity, ASG & SSM."

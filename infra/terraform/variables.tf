@@ -88,8 +88,14 @@ variable "alert_email" {
   default     = ""
 }
 
+variable "enforce_cloudfront_origin_only" {
+  description = "Restrict ALB Security Group to AWS CloudFront origin-facing prefix list and require X-CloudFront-Verify header"
+  type        = bool
+  default     = true
+}
+
 variable "domain_name" {
-  description = "Optional custom domain name for Route 53 Alias record (e.g. app.example.com)"
+  description = "Optional custom domain name for Route 53 Alias record pointing to CloudFront (e.g. app.example.com)"
   type        = string
   default     = ""
 }
@@ -100,8 +106,14 @@ variable "hosted_zone_id" {
   default     = ""
 }
 
-variable "acm_certificate_arn" {
-  description = "Optional ACM TLS Certificate ARN in the deployment region for ALB HTTPS"
+variable "alb_acm_certificate_arn" {
+  description = "Optional ACM TLS Certificate ARN in var.aws_region to encrypt CloudFront-to-ALB origin traffic over HTTPS"
+  type        = string
+  default     = ""
+}
+
+variable "cloudfront_acm_certificate_arn" {
+  description = "Optional ACM TLS Certificate ARN in us-east-1 for custom domain HTTPS on CloudFront"
   type        = string
   default     = ""
 }
